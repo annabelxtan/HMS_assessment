@@ -1,0 +1,480 @@
+---
+title: "HMS Technical Assessment"
+author: "Annabel Tan"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output:          
+  html_document:       
+    theme: united    # https://bookdown.org/yihui/rmarkdown/html-document.html
+    highlight: tango   
+    toc: true
+    toc_depth: 3
+    toc_float: 
+       collapsed: false    # default: true
+       smooth_scroll: false # default: true
+    number_sections: true
+    code_folding: show
+    df_print: paged
+
+    fig_width: 7
+    fig_height: 5
+    fig_align: center 
+    fig_caption: true
+
+---
+
+# Prompt
+You have been provided actual data from the covid-19 pandemic, as reported by state and national governments. These data have already had spikes or errors in reporting corrected and redistributed. Attached are data from the US (excluding Washington state):
+
++ Cumulative confirmed (reported) cases of Covid 19, by location by date
++ Cumulative reported deaths of covid-19, by location by date
++ Cumulative hospitalizations for Covid-19, by location by date (NOTE: hospitalization data is not available for all 50 states, only some)
++ Population of each location.
+
+These are the only 4 inputs that IHME uses for our first-stage deaths model, which produces 14-day forecasts that are then used in an SEIR model.
+
+
+# Set up, including file setup and loading data. 
+## We also check the dimensions of the data and what each variable might mean
+
+```{r, warning=FALSE, message=FALSE, results='hide'}
+library(here)
+library(tidyverse)
+
+setwd(here::here())
+
+data = read.csv("covid_data_cases_deaths_hosp.csv")
+
+dim(data) #7914 observations, 9 variables
+
+
+length(unique(data$location_id)) #checking that there are 51 state IDs 
+length(unique(data$Province.State)) #there are 51 unique state names
+
+length(unique(data$Date)) #there are 194 unique dates 
+
+min(data$Date) #43856 -- converts to January 28 2020
+max(data$Date) #44049 -- converts to Aug 8 2020
+
+length(unique(data$US.STATE)) #US.STATE doesn't appear to mean anything as it is just 1 
+
+```
+
+# Data cleaning
+## Creating a date variable 
+
++ Cleaning the date up: 
+  - One of the first things I noticed was that the date was given in a 5 number format, which is likely days from a date of origin. I took the date of origin to be January 1 1900, which made sense to me, given the earliest date in the dataset corresponds to January 28 2020, which marked the first case of COVID-19 in the United States. The latest date in the dataset corresponds to August 8 2020. 
++ Making sure that there only zeros or more in the data
+  - I also wanted to make sure that there were no negative cases in the dataset, which can sometimes happen. 
++ Creating cases, deaths and hospitalizations per 100,000 to make data comparable across states
+
+```{r}
+data = data %>%
+  mutate(
+    newdate = as.Date(Date, origin="1900-01-01"),
+    cases = if_else(Confirmed < 0, 0, Confirmed),
+    deaths = if_else(Deaths < 0, 0, Deaths),
+    hospitalizations = if_else(Hospitalizations < 0,0, Hospitalizations),
+    cases100k = (cases/population)*100000,
+    deaths100k = (deaths/population)*100000,
+    hosp100k = (hospitalizations/population)*100000)
+      
+```
+
+
+# Q1.	What is the relationship between cases, hospitalizations, and deaths? Describe how these indicators relate to each other, and visualize the relationships in at least 2 different ways.
+
+## Summary of cases, deaths, hospitalizations by state
+
+This table is arranged by most number of cases per 100k to least
+
+```{r}
+
+summarytable = data %>%
+  group_by(Province.State) %>%
+  summarise(median_cases = median(cases100k, na.rm=TRUE),
+            median_deaths = median(deaths100k, na.rm=TRUE),
+            median_hosp = median(hosp100k, na.rm=TRUE)) %>%
+    arrange(desc(median_cases)) 
+
+
+summarytable
+
+```
+
+
+## Relationship between cases and deaths. 
+
+We expect there to be a pretty substantial correlation -- the higher the case count, the higher the number of deaths in each state. We find that there is an overall correlation coefficient of R = 0.82 between cases per 100,000 and deaths per 100,000. We also provide a correlation between cases and deaths by state in table and figure form (though not all states have correlation coefficients due to incomplete data)
+
+```{r, warning=FALSE}
+library(viridis)
+
+ggplot(data=data) + 
+  geom_point(aes(x=cases100k, y=deaths100k), size=0.5) +
+  xlab('Cases/100k population') + 
+  ylab ('Deaths/100k population') +
+  facet_wrap(~Province.State)+
+  theme_bw()
+
+#correlation coefficient by state
+groupcorr = data %>%
+  group_by(Province.State) %>%
+  summarise(correlation = cor(cases100k, deaths100k)) %>%
+  filter(!is.na(correlation))
+
+groupcorr
+
+
+ggplot(groupcorr, aes(x = reorder(Province.State, correlation), y = correlation)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  coord_flip() +  
+  labs(title = "Correlation between Cases and Deaths per 100k by State",
+       x = "State",
+       y = "Correlation Coefficient") +
+  theme_minimal()
+
+#overall correlation coefficient 
+cor(data$cases100k, data$deaths100k, use = "complete.obs",
+    method = c("pearson", "kendall", "spearman")) #0.82
+
+```
+## Relationship between deaths and hospitalizations
+
+For hospitalizations, we will subset the data to rows that only contain hospitalization data. This way, we will avoid plotting blank points. 
+
+We see that there is an even higher correlation between deaths and hospitalizations when broken down by state, which is expected. The overall coefficient between deaths and hospitalizations is 0.93. 
+
+```{r, warning=FALSE}
+
+hospdata = data %>%
+    filter(!is.na(hospitalizations))
+
+
+ggplot(data=hospdata) + 
+  geom_point(aes(x=hosp100k, y=deaths100k), size=0.5) +
+  xlab('Hospitalizations/100k population') + 
+  ylab ('Deaths/100k population') +
+  facet_wrap(~Province.State)+
+  theme_bw()
+
+groupcorr2= hospdata %>%
+  group_by(Province.State) %>%
+  summarise(correlation = cor(hosp100k, deaths100k,  use="complete.obs")) %>%
+  filter(!is.na(correlation))
+
+groupcorr2
+
+ggplot(groupcorr2, aes(x = reorder(Province.State, correlation), y = correlation)) +
+  geom_bar(stat = "identity", fill = "lightgreen") +
+  coord_flip() +  
+  labs(title = "Correlation between Hospitalizations and Deaths per 100k by State",
+       x = "State",
+       y = "Correlation coefficient") +
+  theme_minimal()
+
+cor(hospdata$hosp100k, hospdata$deaths100k, use = "complete.obs",
+    method = c("pearson", "kendall", "spearman")) #0.93
+
+```
+
+## Spatial correlation 
+
+Here we plot a map showing how cases and deaths vary spatially. For this example, I have only selected the cumulative case and death count on the last recorded day (8/8/2020) since the map is 1 dimensional in time. I have categorized the cumulative case adn death counts into a 9 level bivariate category to illustrate the relationship between COVID-19 cases and deaths by state: low case/low death count, low case/med death count, low case/high death, med case/low death, and so on and so forth. 
+
+The map below shows how cases and deaths are correlated throughout the country on 8/8/2020, noting that some states in the South (Louisiana, North Carolina, South Carolina) and East (New York, Massachusetts) having a high case and death count. 
+
+```{r loading spatial packages and census key, include = FALSE, echo = FALSE, eval = TRUE,  message=FALSE, warning=FALSE}
+library(cowplot)
+library(biscale)
+library(tidycensus)
+library(sf)
+library(tmap)
+
+census_api_key("43433014cdd6694b4179f307c1b0361e4b21a382", overwrite = TRUE, install = TRUE)
+
+
+```
+
+
+```{r download shape file, include = FALSE, echo = FALSE, eval = TRUE,  message=FALSE, warning=FALSE}
+#download shape file so we can plot the map
+state_shapefile =  get_acs("state", table = "B19083", year = 2017, 
+                    output = "tidy", geometry = TRUE) %>%
+  select(-moe, -estimate) %>%
+  rename(Province.State = NAME)
+
+statemap = st_as_sf(state_shapefile)
+```
+
+
+```{r maps, eval = TRUE,  message=FALSE, warning=FALSE}
+
+#here we filter out the relevant variables to make the dataset more manageable
+map_data = data %>%
+  select(Province.State, newdate, cases100k, deaths100k, hosp100k) %>%
+  filter(newdate == max(newdate))
+
+#creates a dataset containing case and death count data
+statemap_join = left_join(map_data, statemap, by="Province.State")
+
+
+#bivariate map file
+casedeathmap = bi_class(statemap_join, x = cases100k, y = deaths100k, style="quantile") %>%
+   slice(-1)
+casedeathmap = st_as_sf(casedeathmap)
+
+color_palette = RColorBrewer::brewer.pal(9, "YlOrRd")
+
+m5 = tm_shape(casedeathmap, projection = 2163, unit = "mi") +
+  tm_polygons("bi_class", palette = RColorBrewer::brewer.pal(9, "YlOrRd"), 
+             border.col = "white", lwd = 0.1, legend.show=FALSE) +
+  tm_shape(statemap) + 
+  tm_borders(col="black", lwd=0.3, lty="solid")+
+  tm_text("Province.State", size=0.6, root=3, remove.overlap=TRUE)+
+  tm_layout(
+    outer.margins = 0,  
+    asp = 0,
+       legend.width=1,
+    legend.height=0.5
+    )+
+    tm_add_legend(
+    type = "fill",
+    col = color_palette,
+    title = "COVID Cases and Deaths per 100k",
+    is.portrait = TRUE,
+    labels = c("Low Cases/Low Deaths", "Low Cases/Med Deaths", "Low Cases/High Deaths",
+               "Med Cases/Low Deaths", "Med Cases/Med Deaths", "Med Cases/High Deaths",
+               "High Cases/Low Deaths", "High Cases/Med Deaths", "High Cases/High Deaths")
+ 
+  )
+
+
+
+m5
+```
+
+
+# Q2.	Fit a curve of daily deaths, utilizing these inputs. Describe the approach you used and visualize the results.
+
+## Checking distribution of data
++ We can see that the distribution of confirmed cases, deaths and hospitalizations is right skewed.
++ The variance is greater than the mean for cases, deaths and hospitalizations. 
+
+```{r}
+
+hist(data$cases)
+hist(data$deaths)
+hist(data$hospitalizations)
+
+#check if variance is greater than mean for cases
+with(data, tapply(cases, Province.State, function(x) {
+    sprintf("M (var) = %1.2f (%1.2f)", mean(x,na.rm=TRUE), var(x, na.rm=TRUE))
+}))
+
+#check if variance is greater than mean for deaths
+with(data, tapply(deaths, Province.State, function(x) {
+    sprintf("M (var) = %1.2f (%1.2f)", mean(x, na.rm=TRUE), var(x, na.rm=TRUE))
+}))
+
+#check if variance is greater than mean for hospitalizations
+with(data, tapply(hospitalizations, Province.State, function(x) {
+    sprintf("M (var) = %1.2f (%1.2f)", mean(x, na.rm=TRUE), var(x, na.rm=TRUE))
+}))
+
+```
+**Based on the fact that variance >> mean for all of the variables:**
+
+Because of the skew in the distribution in the exposure (cases) and the fact that variance is greater than the mean, I will explore the use of a **negative binomial regression** to predict daily death count. This has been done in other studies also (https://www.nber.org/papers/w27391, https://jamanetwork.com/journals/jamanetworkopen/article-abstract/2779417) I take into account that there is an offset term given by the log of the population, and that daily deaths will vary by location_id/state.
+
+I have plotted the actual vs predicted daily death count for 3 negative binomial regression models, with death as the outcome. In the first model, I use only cases as a predictor with an offset population term, while accounting for state level differences. The prediction varies by state. 
+
+In the second model, I use cases and hospitalizations as the predictor, while accounting for state level differences. The third model only uses cases as the predictor with an offset population term. 
+
+## Negative binomial 
+
+```{r, message=FALSE, warning=FALSE}
+library(pscl)
+library(lme4)
+
+#negative binomial regression
+#simple model, only cases as the predictor
+model1 = MASS::glm.nb(formula = deaths ~ cases + factor(location_id) + offset(log(population)), 
+               data = data, 
+               na.action = na.exclude)
+
+
+#includes hospitalizations as an additional predictor
+model2 = MASS:: glm.nb(formula = deaths ~ cases + hospitalizations + factor(location_id) + offset(log(population)), 
+               data = data, 
+               na.action = na.exclude)
+
+
+#most parsimonious model, does not account for state 
+model3 = MASS::glm.nb(formula = deaths ~ cases + offset(log(population)), 
+               data = data, 
+               na.action = na.exclude)
+
+
+data$predicted_cases1 <- predict(model1, type = "response")
+data$predicted_cases2 <- predict(model2, type = "response")
+data$predicted_cases3 <- predict(model3, type = "response")
+
+
+#actual no of cases (x) vs predicted (y)
+
+ggplot(data, aes(x = cases, y = predicted_cases1, color=as.factor(Province.State))) +
+ scale_color_viridis(discrete=TRUE, option = "D")+
+  geom_point(alpha = 0.5) +
+  labs(title = "Model 1: deaths ~ cases",
+       x = "Actual Cases",
+       y = "Predicted Cases") +
+  theme_minimal() +
+   theme(plot.title = element_text(color="black", size=10, face="bold.italic"))
+
+ggplot(data, aes(x = cases, y = predicted_cases2, color=as.factor(Province.State))) +
+ scale_color_viridis(discrete=TRUE, option = "D")+
+  geom_point(alpha = 0.5) +
+  labs(title = "Model 2: deaths ~ cases + hospitalizations",
+       x = "Actual Cases",
+       y = "Predicted Cases") +
+  theme_minimal() +
+   theme(plot.title = element_text(color="black", size=10, face="bold.italic"))
+
+
+ggplot(data, aes(x = cases, y = predicted_cases3, color=as.factor(Province.State))) +
+ scale_color_viridis(discrete=TRUE, option = "D")+
+  geom_point(alpha = 0.5) +
+  labs(title = "Model 3: deaths ~ cases (no state)",
+       x = "Actual Cases",
+       y = "Predicted Cases") +
+  theme_minimal() +
+   theme(plot.title = element_text(color="black", size=10, face="bold.italic"))
+
+```
+
+
+# Q3.	Create projections for 14-days after the last observed data point. Visualize the result. Describe the benefits and limitations of your approach. Where do you think this approach has performed particularly well? What types of situations cause your model to struggle?
+
+I decided to use ARIMA to perform time-series forecasting due to several reasons. ARIMA is AutoRegressive Integrated Moving Average, specified by an autoregressive component that refers to the use of past values, difference of observations to make the time series stationary, and a moving average component that shows the error of the model as a combination of prior error term.
+
+First, ARIMA is better suited to handle nonstationarity compared to other linear regression methods Second, ARIMA is easier to use than classical nonlinear epidemiological models such as SIR or SEIR for which no closed form exact solutions exists, and numerical simulations are required [Barlow NS, Weinstein SJ. Accurate closed-form solution of the SIR epidemic model. Physica D. 2020;408:132540. doi: 10.1016/j.physd.2020.132540.]. A recent study also showed that ARIMA models outperformed SIR in predicting COVID-19 cases [Abuhasel KA, Khadr M, Alquraish MM. Analyzing and forecasting COVID-19 pandemic in the Kingdom of Saudi Arabia using ARIMA and SIR models. Comput Intell. 2022;38:770–783. doi: 10.1111/coin.12407, Abolmaali S, Shirzaei S. A comparative study of SIR Model, Linear Regression, Logistic Function and ARIMA Model for forecasting COVID-19 cases. AIMS Public Health. 2021;8:598–613. doi: 10.3934/publichealth.2021048.].
+
+*Benefits*: If the time series data is stationary, the ARIMA model works well and produces accurate forecasts. 
+
+*Limitations*:  ARIMA also doesn't work if the residuals are not normally distributed, and if the residuals are correlated. ARIMA also assumes constant mean and variance over time. ARIMA is very sensitive to missing data, as we have seen. ARIMA does not work on missing data. 
+
+```{r}
+library(forecast)
+library(dplyr)
+
+#Create a state-specific 14 day forecast for cases, deaths, hospitalization
+states =  c("Alabama", "Alaska", "Arizona", "Arkansas", "California", "Colorado", 
+            "Connecticut", "Delaware", "Florida", "Georgia", "Hawaii", "Idaho", 
+            "Illinois", "Indiana", "Iowa", "Kansas", "Kentucky", "Louisiana", 
+            "Maine", "Maryland", "Massachusetts", "Michigan", "Minnesota", 
+            "Mississippi", "Missouri", "Montana", "Nebraska", "Nevada", 
+            "New Hampshire", "New Jersey", "New Mexico", "New York", "North Carolina", 
+            "North Dakota", "Ohio", "Oklahoma", "Oregon", "Pennsylvania", 
+            "Rhode Island", "South Carolina", "South Dakota", "Tennessee", "Texas", 
+            "Utah", "Vermont", "Virginia", "West Virginia", 
+            "Wisconsin", "Wyoming", "District of Columbia")
+
+##CASES
+forecast_by_state_cases <- function(data) {
+  for (state in states) {
+    # Filter data for the current state
+    data_subset <- data %>%
+      filter(Province.State == state) %>%
+      select(cases)
+    
+    # Fit ARIMA model and forecast
+    fit <- auto.arima(data_subset$cases)
+    forecastedValues <- forecast(fit, 14)
+    
+    # Plot the forecast
+    
+    plot(forecastedValues, main = paste("Forecast for", state), 
+        col.main = "darkgreen",
+        xlab = "Time in days",
+        ylab = "Cases")
+  
+  }
+}
+
+forecast_by_state_cases(data)
+
+
+##DEATHS 
+forecast_by_state_deaths <- function(data) {
+  for (state in states) {
+    # Filter data for the current state
+    data_subset <- data %>%
+      filter(Province.State == state) %>%
+      select(deaths)
+    
+    # Fit ARIMA model and forecast
+    fit <- auto.arima(data_subset$deaths)
+    forecastedValues <- forecast(fit, 14)
+    
+    # Plot the forecast
+    
+    plot(forecastedValues, main = paste("Forecast for", state), 
+        col.main = "purple",
+        xlab = "Time in days",
+        ylab = "Deaths")
+  
+  }
+}
+
+forecast_by_state_deaths(data)
+
+
+##HOSPITALIZATIONS 
+
+#subsetting data to contain states containing no missing hospitalization data
+hosp_data = data %>%
+  filter(complete.cases(hospitalizations))
+
+state_hosp_name = c("Alabama", "Alaska","Arizona","Arkansas","Colorado", "Florida", "Georgia","Hawaii","Idaho", "Indiana","Kansas","Kentucky","Maine","Maryland", "Massachusetts", "Minnesota","Mississippi","Montana","Nebraska", "New Hampshire", "New Mexico" ,"North Dakota","Ohio", "Oklahoma","Oregon", "South Dakota","Tennessee","Utah","Virginia", "Wisconsin", "Wyoming")      
+
+forecast_by_state_hosps <- function(data) {
+  for (state in state_hosp_name) {
+    # Filter data for the current state
+    data_subset <- data %>%
+        filter(Province.State == state) %>%
+        select(hospitalizations)
+    
+    # Fit ARIMA model and forecast
+    fit <- auto.arima(data_subset$hospitalizations)
+    forecastedValues <- forecast(fit, 14)
+    
+    # Plot the forecast
+    
+    plot(forecastedValues, main = paste("Forecast for", state), 
+        col.main = "darkblue",
+        xlab = "Time in days",
+        ylab = "Hospitalizations")
+  
+  }
+}
+
+forecast_by_state_hosps(hosp_data)
+
+
+
+
+
+```
+
+
+# Q4.	Lastly, describe future areas of exploration or improvement for your approach. If you had more time, what would you do next?
+
+One assumption made is that historical data is used to make predictions, which may not be entirely true for epidemic modelling, as other factors such as new variants, changing climates, vaccination trends, and others can all affect trajectories. Inter-state dynamics or relationships between the different states could also impact these trajectories. If I had more time, I would look into other confounding factors and include them in a model to a make more accurate predictions. 
+
+Assuming we have access to other data sources, I would like to use recurrent neural networks to do forecasting. Currently we are doing univariate forecasting, neural networks (such as Transformers (https://arxiv.org/abs/1706.03762)) will allow multivariate forecasting. Another benefit of Transformers over the other architectures is that we can incorporate missing values (which are common in the time series setting). However, one drawback is that training these models require access to large datasets and are computationally expensive.
+
+
+
+
+
